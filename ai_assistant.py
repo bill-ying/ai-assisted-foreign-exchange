@@ -1,14 +1,14 @@
 """
 AI Assistant for natural language FX rate queries.
-Uses Command R via Ollama with native tool calling for FX rate lookups.
+Uses LangChain with Ollama and Google Gemma 3:12b for tool calling and FX rate lookups.
 """
 
-import json
 import logging
-from datetime import datetime, date
-from typing import Optional, Dict, Any, List
+from typing import Optional, List, Dict, Any
 
-import ollama
+from langchain_community.chat_models import ChatOllama
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from fx_service import FxRateService, ExchangeResult
 
@@ -19,7 +19,7 @@ class FxAIAssistant:
     """
     AI-powered assistant for USD/CAD exchange rate queries.
     
-    Uses Command R model via Ollama with native tool calling to:
+    Uses LangChain with Google Gemma 3 model via Ollama to:
     1. Parse natural language queries
     2. Call the FX rate service for actual rates from Bank of Canada
     3. Generate natural language responses
@@ -27,52 +27,12 @@ class FxAIAssistant:
     
     MODEL_NAME = "gemma3:12b"
     
-    # Native tool definition for Ollama
-    FX_RATE_TOOL = {
-        "type": "function",
-        "function": {
-            "name": "get_fx_rate",
-            "description": "Get the exchange rate between USD and CAD for a specific date from Bank of Canada. Use this tool whenever the user asks about exchange rates, currency conversion, or how much one currency is worth in another.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "from_currency": {
-                        "type": "string",
-                        "enum": ["USD", "CAD"],
-                        "description": "The source currency to convert from"
-                    },
-                    "to_currency": {
-                        "type": "string",
-                        "enum": ["USD", "CAD"],
-                        "description": "The target currency to convert to"
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": "The date for the exchange rate in YYYY-MM-DD format"
-                    },
-                    "amount": {
-                        "type": "number",
-                        "description": "Optional amount to convert. If not specified, returns the rate for 1 unit of source currency."
-                    }
-                },
-                "required": ["from_currency", "to_currency", "date"]
-            }
-        }
-    }
-    
     SYSTEM_PROMPT = """You are a helpful AI assistant. 
 You have access to real-time and historical exchange rates from the Bank of Canada, but you can also answer general knowledge questions.
 
-To use a tool, you MUST use this format and then STOP: [TOOL: tool_name(arg1=val1, arg2=val2)]
-
-Available tools:
-- get_fx_rate(from_currency: str, to_currency: str, date: str, amount: float = None): Get the exchange rate between USD and CAD for a specific date.
-
 When a user asks about exchange rates or currency conversion between USD and CAD:
 1. You MUST use the get_fx_rate tool to fetch the actual rate. Do not guess the rate.
-2. Output ONLY the tool call tag and nothing else.
-3. Once you output the tag, you will receive an "Observation" with the tool result.
-4. Then, provide a clear, friendly response to the user based on that observation.
+2. Once you receive the tool result, provide a clear, friendly response to the user.
 
 Important notes for FX queries:
 - Only USD and CAD currencies are supported
@@ -92,8 +52,65 @@ For all other questions (e.g. general knowledge, history, facts), answer them di
         """
         self._fx_service = fx_service or FxRateService()
         self._owns_service = fx_service is None
-        self._conversation_history: List[Dict[str, Any]] = []
+        self._chat_history: List[Any] = []
         
+        # Initialize LangChain components
+        self._llm = ChatOllama(
+            model=self.MODEL_NAME,
+            temperature=0
+        )
+        
+        # Create the tool
+        self._tools = [self._create_fx_tool()]
+    
+    def _create_fx_tool(self):
+        """Create the FX rate lookup tool using LangChain's @tool decorator."""
+        fx_service = self._fx_service
+        
+        @tool
+        def get_fx_rate(
+            from_currency: str,
+            to_currency: str,
+            date: str,
+            amount: Optional[float] = None
+        ) -> str:
+            """Get the exchange rate between USD and CAD for a specific date from Bank of Canada.
+            
+            Use this tool whenever the user asks about exchange rates, currency conversion, 
+            or how much one currency is worth in another.
+            
+            Args:
+                from_currency: The source currency to convert from (USD or CAD)
+                to_currency: The target currency to convert to (USD or CAD)
+                date: The date for the exchange rate in YYYY-MM-DD format
+                amount: Optional amount to convert. If not specified, returns the rate for 1 unit
+            
+            Returns:
+                Exchange rate information as a formatted string
+            """
+            logger.info(f"Tool called: {from_currency} -> {to_currency} on {date}, amount={amount}")
+            
+            try:
+                result = fx_service.get_rate_for_date(
+                    from_currency=from_currency.upper(),
+                    to_currency=to_currency.upper(),
+                    lookup_date=date,
+                    amount=amount
+                )
+                
+                if result:
+                    return _format_result(result)
+                else:
+                    return f"No exchange rate data available for {date}. This might be a weekend, holiday, or a date outside the available data range."
+                    
+            except ValueError as e:
+                return f"Error: {str(e)}"
+            except Exception as e:
+                logger.error(f"Error fetching rate: {e}")
+                return f"Error fetching exchange rate: {str(e)}"
+        
+        return get_fx_rate
+    
     def chat(self, user_message: str) -> str:
         """
         Process a user message and return the assistant's response.
@@ -106,215 +123,86 @@ For all other questions (e.g. general knowledge, history, facts), answer them di
         """
         logger.info(f"User message: {user_message}")
         
-        # Add user message to history
-        self._conversation_history.append({
-            "role": "user",
-            "content": user_message
-        })
-        
         try:
-            # Call Ollama
-            try:
-                response = ollama.chat(
-                    model=self.MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": self.SYSTEM_PROMPT},
-                        *self._conversation_history
-                    ],
-                    tools=[self.FX_RATE_TOOL]
-                )
-                assistant_message = response["message"]
-            except Exception as e:
-                # If model doesn't support tools (like Gemma 3 in some Ollama versions), 
-                # retry without tools and parse manually
-                if "does not support tools" in str(e):
-                    logger.info(f"Model {self.MODEL_NAME} does not support native tools, falling back to manual parsing.")
-                    response = ollama.chat(
-                        model=self.MODEL_NAME,
-                        messages=[
-                            {"role": "system", "content": self.SYSTEM_PROMPT},
-                            *self._conversation_history
-                        ]
-                    )
-                    assistant_message = response["message"]
-                else:
-                    raise e
-
-            logger.debug(f"Model response: {assistant_message}")
+            # Manual tool call handling with LangChain
+            self._chat_history.append(HumanMessage(content=user_message))
             
-            # Check for tool calls (native or manual)
-            tool_calls = assistant_message.get("tool_calls")
-            if not tool_calls:
-                # Try manual parsing
-                tool_calls = self._parse_manual_tool_calls(assistant_message.get("content", ""))
+            messages = [SystemMessage(content=self.SYSTEM_PROMPT)] + self._chat_history
+            response = self._llm.invoke(messages)
             
-            if tool_calls:
-                tool_result = self._handle_tool_calls(tool_calls)
+            # Check if response contains a tool call
+            tool_result = self._parse_and_execute_tool(response.content)
+            
+            if tool_result:
+                # Add the tool call to history
+                self._chat_history.append(AIMessage(content=response.content))
                 
-                # Add assistant message with tool call to history
-                self._conversation_history.append(assistant_message)
+                # Add tool result as a user message (observation)
+                self._chat_history.append(HumanMessage(content=f"Observation: {tool_result}"))
                 
-                # Add tool result to history
-                # When falling back to manual parsing, we use 'user' role with 'Observation' prefix
-                # as many models handled through Ollama don't support the 'tool' role natively
-                self._conversation_history.append({
-                    "role": "user",
-                    "content": f"Observation: {tool_result}"
-                })
+                # Get final response after tool execution
+                messages = [SystemMessage(content=self.SYSTEM_PROMPT)] + self._chat_history
+                final_response = self._llm.invoke(messages)
                 
-                # Get final response from model
-                final_response = ollama.chat(
-                    model=self.MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": self.SYSTEM_PROMPT},
-                        *self._conversation_history
-                    ]
-                )
-                
-                final_content = final_response["message"]["content"]
-                logger.debug(f"Final model response: {final_content}")
-                self._conversation_history.append({
-                    "role": "assistant",
-                    "content": final_content
-                })
-                
-                return final_content
+                self._chat_history.append(AIMessage(content=final_response.content))
+                return final_response.content
             else:
-                # No tool call, just return the response
-                content = assistant_message.get("content", "")
-                self._conversation_history.append({
-                    "role": "assistant",
-                    "content": content
-                })
-                return content
+                # No tool call, return response directly
+                self._chat_history.append(AIMessage(content=response.content))
+                return response.content
                 
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             error_msg = f"I encountered an error processing your request: {str(e)}"
-            self._conversation_history.append({
-                "role": "assistant",
-                "content": error_msg
-            })
             return error_msg
-                
-    def _parse_manual_tool_calls(self, content: str) -> List[Dict[str, Any]]:
-        """Parse manual tool calls like [TOOL: tool_name(arg1=val1)] from text."""
+    
+    def _parse_and_execute_tool(self, content: str) -> Optional[str]:
+        """Parse tool calls from model output and execute them."""
         import re
         
-        tool_calls = []
-        # Pattern to match [TOOL: tool_name(...)] or <call:tool_name(...)> (fallback)
-        patterns = [
-            r"\[TOOL:\s*(\w+)\((.*?)\)\]",
-            r"<call:(\w+)\((.*?)\)>"
-        ]
+        # Try to find tool calls in various formats
+        # Format 1: ```tool_code\nget_fx_rate(...)\n```
+        tool_code_pattern = r"```tool_code\s*\n(get_fx_rate\([^)]*\))"
+        # Format 2: get_fx_rate(...)
+        direct_pattern = r"get_fx_rate\(([^)]*)\)"
         
-        for pattern in patterns:
-            matches = re.finditer(pattern, content)
-            for match in matches:
-                func_name = match.group(1)
-                args_str = match.group(2)
-                
-                # More robust argument parsing: match key:val or key=val
-                args = {}
-                if args_str.strip():
-                    # Match key names followed by : or = and then a value
-                    # Values can be quoted or unquoted
-                    arg_pattern = r"(\w+)\s*[:=]\s*(\"[^\"]*\"|'[^']*'|[^,\)]+)"
-                    arg_matches = re.finditer(arg_pattern, args_str)
-                    for arg_match in arg_matches:
-                        k = arg_match.group(1).strip()
-                        v = arg_match.group(2).strip().strip("'").strip('"')
-                        
-                        # Try to convert to numeric if possible
-                        try:
-                            if '.' in v:
-                                args[k] = float(v)
-                            else:
-                                args[k] = int(v)
-                        except ValueError:
-                            args[k] = v
-                
-                tool_calls.append({
-                    "function": {
-                        "name": func_name,
-                        "arguments": args
-                    }
-                })
-            
-        return tool_calls
-
-    def _handle_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> str:
-        """
-        Handle tool calls from the model.
+        match = re.search(tool_code_pattern, content) or re.search(direct_pattern, content)
         
-        Args:
-            tool_calls: List of tool call dictionaries from the model
-            
-        Returns:
-            Tool result as a string
-        """
-        results = []
-        
-        for tool_call in tool_calls:
-            func = tool_call.get("function", {})
-            func_name = func.get("name")
-            
-            if func_name == "get_fx_rate":
-                args = func.get("arguments", {})
-                result = self._execute_fx_rate_lookup(args)
-                results.append(result)
+        if match:
+            # Extract the function call
+            if 'tool_code' in content:
+                func_call = match.group(1)
             else:
-                results.append(f"Unknown tool: {func_name}")
-        
-        return "\n".join(results)
-    
-    def _execute_fx_rate_lookup(self, args: Dict[str, Any]) -> str:
-        """
-        Execute the FX rate lookup tool.
-        
-        Args:
-            args: Tool arguments containing from_currency, to_currency, date, and optional amount
+                func_call = match.group(0)
             
-        Returns:
-            Result string with exchange rate information
-        """
-        from_currency = args.get("from_currency", "").upper()
-        to_currency = args.get("to_currency", "").upper()
-        date_str = args.get("date", "")
-        amount = args.get("amount")
-        
-        logger.info(f"Executing FX lookup: {from_currency} -> {to_currency} on {date_str}, amount={amount}")
-        
-        try:
-            result = self._fx_service.get_rate_for_date(
-                from_currency=from_currency,
-                to_currency=to_currency,
-                lookup_date=date_str,
-                amount=amount
-            )
+            logger.info(f"Detected tool call: {func_call}")
             
-            if result:
-                return self._format_result(result)
-            else:
-                return f"No exchange rate data available for {date_str}. This might be a weekend, holiday, or a date outside the available data range."
-                
-        except ValueError as e:
-            return f"Error: {str(e)}"
-        except Exception as e:
-            logger.error(f"Error fetching rate: {e}")
-            return f"Error fetching exchange rate: {str(e)}"
-    
-    def _format_result(self, result: ExchangeResult) -> str:
-        """Format an ExchangeResult for the model to use in its response."""
-        if result.amount is not None and result.converted_amount is not None:
-            return (f"Exchange rate on {result.rate_date}: "
-                    f"1 {result.from_currency.value} = {result.rate} {result.to_currency.value}. "
-                    f"{result.amount} {result.from_currency.value} = {result.converted_amount} {result.to_currency.value}")
-        return f"Exchange rate on {result.rate_date}: 1 {result.from_currency.value} = {result.rate} {result.to_currency.value}"
+            # Parse arguments
+            args = {}
+            arg_pattern = r'(\w+)\s*=\s*["\']([^"\']*)["\']|(\w+)\s*=\s*(\d+\.?\d*)'
+            for arg_match in re.finditer(arg_pattern, func_call):
+                if arg_match.group(1):  # string argument
+                    args[arg_match.group(1)] = arg_match.group(2)
+                elif arg_match.group(3):  # numeric argument
+                    key = arg_match.group(3)
+                    val = arg_match.group(4)
+                    args[key] = float(val) if '.' in val else int(val)
+            
+            # Execute the tool
+            if args:
+                tool = self._tools[0]
+                try:
+                    result = tool.func(**args)
+                    return result
+                except Exception as e:
+                    logger.error(f"Error executing tool: {e}")
+                    return f"Error executing tool: {str(e)}"
+        
+        return None
     
     def clear_history(self):
         """Clear the conversation history."""
-        self._conversation_history = []
+        self._chat_history = []
     
     def close(self):
         """Clean up resources."""
@@ -326,3 +214,12 @@ For all other questions (e.g. general knowledge, history, facts), answer them di
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+
+def _format_result(result: ExchangeResult) -> str:
+    """Format an ExchangeResult for the model to use in its response."""
+    if result.amount is not None and result.converted_amount is not None:
+        return (f"Exchange rate on {result.rate_date}: "
+                f"1 {result.from_currency.value} = {result.rate} {result.to_currency.value}. "
+                f"{result.amount} {result.from_currency.value} = {result.converted_amount} {result.to_currency.value}")
+    return f"Exchange rate on {result.rate_date}: 1 {result.from_currency.value} = {result.rate} {result.to_currency.value}"
