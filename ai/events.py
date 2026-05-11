@@ -27,6 +27,8 @@ class EventType(Enum):
     RESPONSE_GENERATED = auto()
     ERROR_OCCURRED = auto()
     HISTORY_CLEARED = auto()
+    COMPLIANCE_PASSED = auto()
+    COMPLIANCE_FAILED = auto()
 
 
 @dataclass
@@ -128,6 +130,8 @@ class AuditLogger(EventObserver):
             EventType.RESPONSE_GENERATED: self._log_response,
             EventType.ERROR_OCCURRED: self._log_error,
             EventType.HISTORY_CLEARED: self._log_clear,
+            EventType.COMPLIANCE_PASSED: self._log_compliance_passed,
+            EventType.COMPLIANCE_FAILED: self._log_compliance_failed,
         }
         handler = handlers.get(event.event_type)
         if handler:
@@ -163,3 +167,15 @@ class AuditLogger(EventObserver):
 
     def _log_clear(self, event: AssistantEvent) -> None:
         self._logger.info("AUDIT | Chat history cleared")
+
+    def _log_compliance_passed(self, event: AssistantEvent) -> None:
+        self._logger.info(
+            "AUDIT | Compliance PASSED after %d correction(s)",
+            event.data.get('correction_attempts', 0)
+        )
+
+    def _log_compliance_failed(self, event: AssistantEvent) -> None:
+        self._logger.warning(
+            "AUDIT | Compliance FAILED — delivered with disclaimer. Violations: %s",
+            event.data.get('violations', [])
+        )

@@ -29,14 +29,20 @@ The codebase follows **Gang of Four (GoF) design patterns** for extensibility an
 
 ```
 ai-assisted-foreign-exchange/
-├── main.py                          # CLI entry point
+├── main.py                          # CLI entry point (--compliance flag)
 ├── ai_assistant.py                  # Backward-compat shim
 ├── ai/                              # AI layer (GoF patterns)
 │   ├── fx_assistant.py              # Facade + Factory Method
+│   ├── compliance_assistant.py      # Facade subclass (LangGraph integration)
 │   ├── events.py                    # Observer (audit events)
 │   ├── tools.py                     # Template Method + Registry
 │   ├── result_formatter.py          # Strategy (output formatting)
-│   └── chat_history.py             # Strategy (message storage)
+│   ├── chat_history.py              # Strategy (message storage)
+│   └── compliance/                  # LangGraph compliance validation layer
+│       ├── state.py                 # ComplianceState + Value Objects
+│       ├── rules.py                 # Chain of Responsibility (compliance rules)
+│       ├── validator.py             # Strategy (lenient vs. strict validation)
+│       └── graph.py                 # Builder (LangGraph StateGraph)
 └── fx_service/                      # FX domain layer
     ├── fx_rate_service.py           # Service orchestrator
     ├── rate_provider.py             # Strategy (data sources)
@@ -48,12 +54,15 @@ ai-assisted-foreign-exchange/
 
 | Pattern | Location | Purpose |
 |---------|----------|---------|
-| **Facade** | `FxAssistant` | Hides LLM, tools, history, and events behind `chat()` |
-| **Factory Method** | `FxAssistant.create()` | Assembles components with sensible defaults |
-| **Strategy** | `RateProvider`, `ResultFormatter`, `ChatHistory` | Swap implementations without modifying clients |
+| **Facade** | `FxAssistant`, `ComplianceFxAssistant` | Hides LLM, tools, history, and graph behind `chat()` |
+| **Factory Method** | `FxAssistant.create()`, `ComplianceFxAssistant.create()` | Assembles components with sensible defaults |
+| **Strategy** | `RateProvider`, `ResultFormatter`, `ChatHistory`, `ValidationStrategy` | Swap implementations without modifying clients |
 | **Template Method** | `BaseFxTool` → `FxRateTool` | validate → execute → format pipeline |
 | **Observer** | `EventBus`, `AuditLogger` | Decoupled audit logging for compliance |
 | **Adapter** | `BankOfCanadaProvider` | Adapts HTTP client to `RateProvider` interface |
+| **Chain of Responsibility** | `ComplianceRule` → concrete rules | Each rule checks one concern, delegates down the chain |
+| **Builder** | `ComplianceGraphBuilder` | Constructs the LangGraph `StateGraph` topology step by step |
+| **Value Object** | `ValidationResult`, `RuleViolation` | Immutable, frozen compliance outcomes safe for audit storage |
 
 ## Features
 
@@ -63,7 +72,48 @@ ai-assisted-foreign-exchange/
 - **Bidirectional**: Both USD→CAD and CAD→USD conversions are supported
 - **Amount Conversion**: An amount can be specified to be converted, not just the rate
 - **Audit Logging**: All tool calls and responses are logged via the Observer pattern
+- **Compliance Validation** *(opt-in)*: LangGraph graph verifies every LLM response against raw tool data, auto-corrects on failure, and appends a disclaimer if correction is exhausted
 - **IDE Debugging**: Includes VS Code debug configurations
+
+## Compliance Validation (LangGraph)
+
+Enabled with `--compliance` / `-c`. When active, every `chat()` call routes through a **LangGraph `StateGraph`** instead of the standard direct loop:
+
+```
+invoke_llm
+    │
+    ├─ tool calls? ──yes──► execute_tools ──► invoke_llm_final
+    │                                              │
+    └─ no ────────────────────────────────────────┤
+                                                   ▼
+                                              validate
+                                                   │
+                                    ┌──────────────┴──────────────┐
+                                 passed?                       failed?
+                                    │                              │
+                                  emit                         correct
+                                 [END]                (inject correction prompt)
+                                                               │
+                                                        max retries?
+                                                    ├─ yes ──► emit + disclaimer
+                                                    └─ no  ──► invoke_llm_final
+```
+
+### Compliance Rules (Chain of Responsibility)
+
+| Rule | Severity | What it checks |
+|------|----------|----------------|
+| `RateValuePresentRule` | **ERROR** | Exact numeric rate from tool result appears in response |
+| `SourceAttributionRule` | WARNING | "Bank of Canada" is cited as the data source |
+| `DateConsistencyRule` | WARNING | Queried year appears in the response |
+| `CurrencyConsistencyRule` | WARNING | Queried currencies (USD/CAD) are mentioned |
+
+### Validation Strategies (Strategy pattern)
+
+| Strategy | Behaviour |
+|----------|-----------|
+| `LenientValidationStrategy` *(default)* | Only ERROR violations trigger correction |
+| `StrictValidationStrategy` | WARNING violations also trigger correction |
 
 ## Prerequisites
 
@@ -79,7 +129,11 @@ ai-assisted-foreign-exchange/
 An interactive chat session can be started:
 
 ```bash
+# Standard mode
 python main.py
+
+# With LangGraph compliance validation
+python main.py --compliance
 ```
 
 Example conversation:
@@ -101,7 +155,11 @@ Assistant: On March 31, 2024, 1 CAD was worth 0.7385 USD according to the Bank o
 A single question can be asked and exited:
 
 ```bash
+# Standard
 python main.py --query "How much CAD was for USD$1 on 2024-01-15?"
+
+# With compliance validation
+python main.py --compliance --query "How much CAD was for USD$1 on 2024-01-15?"
 ```
 
 ## License

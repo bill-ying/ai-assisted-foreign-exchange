@@ -6,6 +6,7 @@ chat history), and Template Method (tools) implementations.
 """
 
 from .fx_assistant import FxAssistant
+from .compliance_assistant import ComplianceFxAssistant
 from .events import EventBus, EventType, AssistantEvent, EventObserver, AuditLogger
 from .result_formatter import ResultFormatter, LLMResultFormatter, HumanResultFormatter
 from .chat_history import ChatHistory, InMemoryChatHistory
@@ -13,6 +14,7 @@ from .tools import ToolRegistry, FxRateTool
 
 __all__ = [
     'FxAssistant',
+    'ComplianceFxAssistant',
     'EventBus',
     'EventType',
     'AssistantEvent',

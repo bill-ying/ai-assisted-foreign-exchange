@@ -3,7 +3,11 @@
 AI-Assisted Foreign Exchange Rate Lookup
 
 Interactive CLI application for querying USD/CAD exchange rates
-using natural language. Powered by Command R7B via Ollama.
+using natural language. Powered by Gemma 4 via Ollama.
+
+Pass --compliance to enable the LangGraph compliance validation graph,
+which verifies every LLM response against the raw tool data before
+delivering it to the user.
 """
 
 import argparse
@@ -11,6 +15,7 @@ import logging
 import sys
 
 from ai_assistant import FxAIAssistant
+from ai.compliance_assistant import ComplianceFxAssistant
 
 
 def setup_logging(debug: bool = False):
@@ -22,11 +27,13 @@ def setup_logging(debug: bool = False):
     )
 
 
-def print_welcome():
+def print_welcome(compliance_mode: bool = False):
     """Print welcome message and usage hints."""
     print("\n" + "=" * 60)
     print("  AI-Assisted USD/CAD Exchange Rate Lookup")
-    print("  Powered by Bank of Canada data & Gemma 3")
+    print("  Powered by Bank of Canada data & Gemma 4")
+    if compliance_mode:
+        print("  ✓ Compliance validation enabled (LangGraph)")
     print("=" * 60)
     print("\nAsk me about USD/CAD exchange rates in natural language!")
     print("\nExample questions:")
@@ -37,6 +44,26 @@ def print_welcome():
     print("  • Type 'quit' or 'exit' to end the session")
     print("  • Type 'clear' to reset conversation history")
     print("-" * 60 + "\n")
+
+
+def _build_assistant(compliance: bool):
+    """
+    Instantiate the appropriate assistant based on the --compliance flag.
+
+    Both assistants share the same public API (chat / clear_history / close)
+    so the rest of main() requires zero branching — the flag only affects
+    which concrete class is constructed (Strategy-like selection).
+
+    Args:
+        compliance: If True, use ComplianceFxAssistant (LangGraph graph);
+                    otherwise use the standard FxAIAssistant.
+
+    Returns:
+        A context-manager-compatible assistant instance
+    """
+    if compliance:
+        return ComplianceFxAssistant.create()
+    return FxAIAssistant()
 
 
 def main():
@@ -54,22 +81,31 @@ def main():
         type=str,
         help="Single query mode: ask a question and exit"
     )
-    
+    parser.add_argument(
+        "-c", "--compliance",
+        action="store_true",
+        help=(
+            "Enable LangGraph compliance validation: every LLM response is "
+            "verified against raw tool data before delivery and corrected "
+            "automatically if it fails."
+        )
+    )
+
     args = parser.parse_args()
     setup_logging(args.debug)
-    
+
     # Single query mode
     if args.query:
-        with FxAIAssistant() as assistant:
+        with _build_assistant(args.compliance) as assistant:
             response = assistant.chat(args.query)
             print(response)
         return 0
     
     # Interactive mode
-    print_welcome()
+    print_welcome(compliance_mode=args.compliance)
     
     try:
-        with FxAIAssistant() as assistant:
+        with _build_assistant(args.compliance) as assistant:
             while True:
                 try:
                     user_input = input("You: ").strip()
