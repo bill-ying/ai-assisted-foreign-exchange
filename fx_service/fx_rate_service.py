@@ -10,7 +10,8 @@ from datetime import date, datetime
 from typing import List, Optional, Union
 import logging
 
-from .rate_provider import RateProvider, BankOfCanadaProvider
+from .rate_provider import RateProvider
+from .mcp_provider import McpProvider
 from .currency import Currency, ExchangeDirection, ExchangeResult
 
 logger = logging.getLogger(__name__)
@@ -35,9 +36,9 @@ class FxRateService:
 
         Args:
             provider: Rate data source (Strategy pattern).
-                     Defaults to BankOfCanadaProvider if not provided.
+                     Defaults to McpProvider if not provided.
         """
-        self._provider = provider or BankOfCanadaProvider()
+        self._provider = provider or McpProvider()
         self._owns_provider = provider is None
 
     def get_rate_for_date(

@@ -21,7 +21,8 @@ from langchain_core.messages import (
 )
 
 from fx_service import FxRateService
-from fx_service.rate_provider import RateProvider, BankOfCanadaProvider
+from fx_service.rate_provider import RateProvider
+from fx_service.mcp_provider import McpProvider
 from ai.events import EventBus, EventType, AssistantEvent, AuditLogger
 from ai.result_formatter import ResultFormatter, LLMResultFormatter
 from ai.chat_history import ChatHistory, InMemoryChatHistory
@@ -47,7 +48,7 @@ class FxAssistant:
     """
 
     SYSTEM_PROMPT = """You are a helpful AI assistant. Answer general knowledge questions directly.
-For USD/CAD exchange rates, use the get_fx_rate tool. Only USD and CAD are supported. Ask for a date if unspecified. Explain that future dates, weekends, and holidays may not have rates available."""
+For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt to determine whether a date is valid, in the future, a weekend, or a holiday before calling the tool. Call the tool for every date the user provides; the server will determine if a rate is available. If the tool returns no rate, inform the user that no rate is available for that date."""
 
     def __init__(
         self,
@@ -105,8 +106,8 @@ For USD/CAD exchange rates, use the get_fx_rate tool. Only USD and CAD are suppo
         Returns:
             Fully configured FxAssistant instance
         """
-        # Strategy: rate provider
-        provider = rate_provider or BankOfCanadaProvider()
+        # Strategy: rate provider (default: MCP server)
+        provider = rate_provider or McpProvider()
         fx_service = FxRateService(provider=provider)
 
         # Strategy: result formatter

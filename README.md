@@ -17,57 +17,45 @@ In regulated financial environments, systems must be **repeatable, deterministic
 **It is demonstrated in this project how AI can serve as a user-friendly INTERFACE layer.** 
 However, the *actual* heavyweight financial logic (ledgers, rate application, risk calculations, etc.) should remain in deterministic, rule-based systems where code can be statically analyzed and behaviour is guaranteed. Tool-calls should be performed by the AI into these deterministic systems rather than attempting to perform the calculations itself.
 
+## Architecture
+
+Exchange rate data is fetched via a dedicated [MCP server](https://github.com/bill-ying/mcp-server-ts-bank-of-canada-valet) deployed as a Cloudflare Worker. The AI assistant calls the MCP server's `get_rate` tool over the Streamable HTTP transport — it **never** calls the Bank of Canada Valet API directly.
+
+```
+┌───────────────────────────────────────────────────────────┐
+│                  AI-Assisted FX Rate Lookup               │
+│                                                           │
+│  User ──► Gemma 4 (LLM) ──► LangChain Tool Call           │
+│                                    │                      │
+│                                    ▼                      │
+│                          McpProvider (Strategy)           │
+│                       MCP Python SDK (Streamable HTTP)    │
+└────────────────────────────────┬──────────────────────────┘
+                                 │  HTTPS / JSON-RPC
+                                 ▼
+┌───────────────────────────────────────────────────────────┐
+│       MCP Server (Cloudflare Worker)                      │
+│       get_rate tool → Bank of Canada Valet API            │
+│  https://mcp-server-bank-of-canada-valet.                 │
+│         bill-ying.workers.dev/mcp                         │
+└───────────────────────────────────────────────────────────┘
+```
+
+This decoupled architecture cleanly separates concerns:
+- **MCP server** owns the data source integration, schema validation, and structured responses
+- **AI client** owns the conversational interface, tool orchestration, and compliance validation
+- **Strategy pattern** allows swapping between `McpProvider` and `BankOfCanadaProvider` with zero code changes
+
 ## Comparison with Previous Work
 
 The original [fx-rate](https://github.com/bill-ying/fx-rate) project is a traditional command-line utility. It relies on strict, deterministic inputs where users must provide specific flags and formats (e.g., `--date 2024-01-01`) to get a result. This ensures reliability but offers a rigid user experience.
 
 In contrast, this **AI-assisted project** acts as a Proof of Concept for a modern, conversational interface. **Gemma 4 26B A4B** is leveraged to understand natural language queries (e.g., "What was the rate on 2024-01-15?"), whereby an intuitive and user-friendly experience is prioritized while the same underlying data source is used.
 
-## Architecture
-
-The codebase follows **Gang of Four (GoF) design patterns** for extensibility and clean separation of concerns:
-
-```
-ai-assisted-foreign-exchange/
-├── main.py                          # CLI entry point (--compliance flag)
-├── ai_assistant.py                  # Backward-compat shim
-├── ai/                              # AI layer (GoF patterns)
-│   ├── fx_assistant.py              # Facade + Factory Method
-│   ├── compliance_assistant.py      # Facade subclass (LangGraph integration)
-│   ├── events.py                    # Observer (audit events)
-│   ├── tools.py                     # Template Method + Registry
-│   ├── result_formatter.py          # Strategy (output formatting)
-│   ├── chat_history.py              # Strategy (message storage)
-│   └── compliance/                  # LangGraph compliance validation layer
-│       ├── state.py                 # ComplianceState + Value Objects
-│       ├── rules.py                 # Chain of Responsibility (compliance rules)
-│       ├── validator.py             # Strategy (lenient vs. strict validation)
-│       └── graph.py                 # Builder (LangGraph StateGraph)
-└── fx_service/                      # FX domain layer
-    ├── fx_rate_service.py           # Service orchestrator
-    ├── rate_provider.py             # Strategy (data sources)
-    ├── bank_of_canada_client.py     # HTTP client
-    └── currency.py                  # Domain model
-```
-
-### Design Patterns Used
-
-| Pattern | Location | Purpose |
-|---------|----------|---------|
-| **Facade** | `FxAssistant`, `ComplianceFxAssistant` | Hides LLM, tools, history, and graph behind `chat()` |
-| **Factory Method** | `FxAssistant.create()`, `ComplianceFxAssistant.create()` | Assembles components with sensible defaults |
-| **Strategy** | `RateProvider`, `ResultFormatter`, `ChatHistory`, `ValidationStrategy` | Swap implementations without modifying clients |
-| **Template Method** | `BaseFxTool` → `FxRateTool` | validate → execute → format pipeline |
-| **Observer** | `EventBus`, `AuditLogger` | Decoupled audit logging for compliance |
-| **Adapter** | `BankOfCanadaProvider` | Adapts HTTP client to `RateProvider` interface |
-| **Chain of Responsibility** | `ComplianceRule` → concrete rules | Each rule checks one concern, delegates down the chain |
-| **Builder** | `ComplianceGraphBuilder` | Constructs the LangGraph `StateGraph` topology step by step |
-| **Value Object** | `ValidationResult`, `RuleViolation` | Immutable, frozen compliance outcomes safe for audit storage |
-
 ## Features
 
 - **Natural Language Queries**: Exchange rates can be queried in plain English
-- **Bank of Canada Data**: Official exchange rates are provided from the Bank of Canada Valet API
+- **MCP Server Integration**: Exchange rates are fetched via the [Bank of Canada Valet MCP server](https://github.com/bill-ying/mcp-server-ts-bank-of-canada-valet) using the MCP Python SDK (Streamable HTTP transport)
 - **AI-Powered**: **Gemma 4 26B** is used via Ollama with native function calling (LangChain)
 - **Bidirectional**: Both USD→CAD and CAD→USD conversions are supported
 - **Amount Conversion**: An amount can be specified to be converted, not just the rate
@@ -120,6 +108,7 @@ invoke_llm
 - Python 3.9 or higher
 - [Ollama](https://ollama.ai/) installed and running
 - **Gemma 4 26B** model pulled in Ollama (`ollama pull gemma4:26b`)
+- Internet access (for calling the MCP server on Cloudflare Workers)
 
 
 ## Usage

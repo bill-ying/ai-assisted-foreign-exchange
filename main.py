@@ -14,8 +14,7 @@ import argparse
 import logging
 import sys
 
-from ai_assistant import FxAIAssistant
-from ai.compliance_assistant import ComplianceFxAssistant
+from ai import FxAssistant, ComplianceFxAssistant
 
 
 def setup_logging(debug: bool = False):
@@ -56,14 +55,14 @@ def _build_assistant(compliance: bool):
 
     Args:
         compliance: If True, use ComplianceFxAssistant (LangGraph graph);
-                    otherwise use the standard FxAIAssistant.
+                    otherwise use the standard FxAssistant.
 
     Returns:
         A context-manager-compatible assistant instance
     """
     if compliance:
         return ComplianceFxAssistant.create()
-    return FxAIAssistant()
+    return FxAssistant.create()
 
 
 def main():
