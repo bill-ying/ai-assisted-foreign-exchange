@@ -13,9 +13,10 @@ only with chat() and clear_history() — all internal wiring is hidden.
 """
 
 import logging
+import os
 from typing import Optional, List
 
-from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import (
     HumanMessage, AIMessage, SystemMessage, ToolMessage
 )
@@ -36,7 +37,7 @@ class FxAssistant:
     AI-powered assistant for USD/CAD exchange rate queries (GoF Facade).
 
     Composes multiple subsystems behind a simple interface:
-    - LLM (via LangChain ChatOllama, swappable via Strategy)
+    - LLM (via LangChain ChatOpenAI pointed at OpenRouter, swappable via Strategy)
     - ToolRegistry (manages FX tools and LangChain bindings)
     - ChatHistory (Strategy for conversation storage)
     - EventBus (Observer for audit and monitoring)
@@ -82,7 +83,7 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
     @classmethod
     def create(
         cls,
-        model_name: str = "gemma4:26b",
+        model_name: str = "google/gemma-4-31b-it:free",
         temperature: float = 0.1,
         rate_provider: Optional[RateProvider] = None,
         formatter: Optional[ResultFormatter] = None,
@@ -96,7 +97,7 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
         recommended way to create an assistant.
 
         Args:
-            model_name: Ollama model name (default: gemma4:26b)
+            model_name: OpenRouter model name (default: google/gemma-4-31b-it:free)
             temperature: LLM temperature (0 = deterministic)
             rate_provider: Rate data source strategy (default: Bank of Canada)
             formatter: Result formatting strategy (default: LLM formatter)
@@ -121,8 +122,19 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
         registry = ToolRegistry()
         registry.register("get_fx_rate", fx_rate_tool, lc_tool)
 
-        # LLM with tools bound (LangChain native tool calling), optimized for Gemma 4
-        llm = ChatOllama(model=model_name, temperature=temperature, top_p=0.9)
+        # LLM with tools bound (LangChain native tool calling) via OpenRouter
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "OPENROUTER_API_KEY environment variable is required. "
+                "Get one at https://openrouter.ai/keys"
+            )
+        llm = ChatOpenAI(
+            model=model_name,
+            temperature=temperature,
+            openai_api_key=api_key,
+            openai_api_base="https://openrouter.ai/api/v1",
+        )
         llm_with_tools = llm.bind_tools(registry.langchain_tools)
 
         # Strategy: chat history

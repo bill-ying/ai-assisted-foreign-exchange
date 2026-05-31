@@ -25,7 +25,7 @@ Exchange rate data is fetched via a dedicated [MCP server](https://github.com/bi
 ┌───────────────────────────────────────────────────────────┐
 │                  AI-Assisted FX Rate Lookup               │
 │                                                           │
-│  User ──► Gemma 4 (LLM) ──► LangChain Tool Call           │
+│  User ──► OpenRouter (Gemma 4) ──► LangChain Tool Call    │
 │                                    │                      │
 │                                    ▼                      │
 │                          McpProvider (Strategy)           │
@@ -50,13 +50,13 @@ This decoupled architecture cleanly separates concerns:
 
 The original [fx-rate](https://github.com/bill-ying/fx-rate) project is a traditional command-line utility. It relies on strict, deterministic inputs where users must provide specific flags and formats (e.g., `--date 2024-01-01`) to get a result. This ensures reliability but offers a rigid user experience.
 
-In contrast, this **AI-assisted project** acts as a Proof of Concept for a modern, conversational interface. **Gemma 4 26B A4B** is leveraged to understand natural language queries (e.g., "What was the rate on 2024-01-15?"), whereby an intuitive and user-friendly experience is prioritized while the same underlying data source is used.
+In contrast, this **AI-assisted project** acts as a Proof of Concept for a modern, conversational interface. **Gemma 4 31B** is leveraged via OpenRouter to understand natural language queries (e.g., "What was the rate on 2024-01-15?"), whereby an intuitive and user-friendly experience is prioritized while the same underlying data source is used.
 
 ## Features
 
 - **Natural Language Queries**: Exchange rates can be queried in plain English
 - **MCP Server Integration**: Exchange rates are fetched via the [Bank of Canada Valet MCP server](https://github.com/bill-ying/mcp-server-ts-bank-of-canada-valet) using the MCP Python SDK (Streamable HTTP transport)
-- **AI-Powered**: **Gemma 4 26B** is used via Ollama with native function calling (LangChain)
+- **AI-Powered**: **Gemma 4 31B** is used via OpenRouter (using `google/gemma-4-31b-it:free`) with native function calling (LangChain)
 - **Bidirectional**: Both USD→CAD and CAD→USD conversions are supported
 - **Amount Conversion**: An amount can be specified to be converted, not just the rate
 - **Audit Logging**: All tool calls and responses are logged via the Observer pattern
@@ -72,19 +72,19 @@ invoke_llm
     │
     ├─ tool calls? ──yes──► execute_tools ──► invoke_llm_final
     │                                              │
-    └─ no ────────────────────────────────────────┤
+    └─ no ─────────────────────────────────────────┤
                                                    ▼
                                               validate
                                                    │
                                     ┌──────────────┴──────────────┐
                                  passed?                       failed?
-                                    │                              │
+                                    │                             │
                                   emit                         correct
                                  [END]                (inject correction prompt)
                                                                │
                                                         max retries?
-                                                    ├─ yes ──► emit + disclaimer
-                                                    └─ no  ──► invoke_llm_final
+                                                                ├─ yes ──► emit + disclaimer
+                                                                └─ no  ──► invoke_llm_final
 ```
 
 ### Compliance Rules (Chain of Responsibility)
@@ -106,9 +106,8 @@ invoke_llm
 ## Prerequisites
 
 - Python 3.9 or higher
-- [Ollama](https://ollama.ai/) installed and running
-- **Gemma 4 26B** model pulled in Ollama (`ollama pull gemma4:26b`)
-- Internet access (for calling the MCP server on Cloudflare Workers)
+- An OpenRouter API Key configured in `.env` file (`OPENROUTER_API_KEY="sk-or-..."`)
+- Internet access (for calling OpenRouter API and the MCP server on Cloudflare Workers)
 
 
 ## Usage

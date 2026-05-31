@@ -93,7 +93,7 @@ class ComplianceFxAssistant(FxAssistant):
     @classmethod
     def create(
         cls,
-        model_name: str = "gemma4:26b",
+        model_name: str = "google/gemma-4-31b-it:free",
         temperature: float = 0.1,
         rate_provider: Optional[RateProvider] = None,
         formatter: Optional[ResultFormatter] = None,
@@ -109,7 +109,7 @@ class ComplianceFxAssistant(FxAssistant):
         then builds the compliance graph on top using ComplianceGraphBuilder.
 
         Args:
-            model_name:          Ollama model name (default: gemma4:26b)
+            model_name:          OpenRouter model name (default: google/gemma-4-31b-it:free)
             temperature:         LLM temperature (0 = deterministic)
             rate_provider:       Rate data source strategy
             formatter:           Result formatting strategy
@@ -212,3 +212,12 @@ class ComplianceFxAssistant(FxAssistant):
                 AssistantEvent(EventType.ERROR_OCCURRED, data={"error": str(e)})
             )
             return f"I encountered an error processing your request: {str(e)}"
+
+    def get_graph_mermaid(self) -> str:
+        """
+        Returns the Mermaid representation of the underlying LangGraph.
+        
+        Useful for generating visualizations of the compliance pipeline for documentation
+        or debugging purposes.
+        """
+        return self._compliance_graph.get_graph().draw_mermaid()

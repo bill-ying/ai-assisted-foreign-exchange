@@ -3,7 +3,7 @@
 AI-Assisted Foreign Exchange Rate Lookup
 
 Interactive CLI application for querying USD/CAD exchange rates
-using natural language. Powered by Gemma 4 via Ollama.
+using natural language. Powered by Gemma via OpenRouter.
 
 Pass --compliance to enable the LangGraph compliance validation graph,
 which verifies every LLM response against the raw tool data before
@@ -14,7 +14,11 @@ import argparse
 import logging
 import sys
 
+from dotenv import load_dotenv
+
 from ai import FxAssistant, ComplianceFxAssistant
+
+load_dotenv()
 
 
 def setup_logging(debug: bool = False):
@@ -89,9 +93,20 @@ def main():
             "automatically if it fails."
         )
     )
+    parser.add_argument(
+        "--print-graph",
+        action="store_true",
+        help="Print the Mermaid graph of the compliance pipeline and exit"
+    )
 
     args = parser.parse_args()
     setup_logging(args.debug)
+
+    if args.print_graph:
+        # Require ComplianceFxAssistant to extract the graph
+        with ComplianceFxAssistant.create() as assistant:
+            print("```mermaid\n" + assistant.get_graph_mermaid() + "\n```")
+        return 0
 
     # Single query mode
     if args.query:
