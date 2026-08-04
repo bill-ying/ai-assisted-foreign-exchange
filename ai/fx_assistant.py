@@ -14,12 +14,16 @@ only with chat() and clear_history() — all internal wiring is hidden.
 
 import logging
 import os
-from typing import Optional, List
+from typing import Optional, List, TypedDict
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import (
     HumanMessage, AIMessage, SystemMessage, ToolMessage
 )
+try:
+    import openai as _openai
+except ImportError:  # pragma: no cover
+    _openai = None  # type: ignore[assignment]
 
 from fx_service import FxRateService
 from fx_service.rate_provider import RateProvider
@@ -30,6 +34,12 @@ from ai.chat_history import ChatHistory, InMemoryChatHistory
 from ai.tools import ToolRegistry, FxRateTool, create_langchain_tool
 
 logger = logging.getLogger(__name__)
+
+
+class ChatResult(TypedDict):
+    """Structured return value from FxAssistant.chat()."""
+    answer: str
+    model: str
 
 
 class FxAssistant:
@@ -43,10 +53,21 @@ class FxAssistant:
     - EventBus (Observer for audit and monitoring)
     - ResultFormatter (Strategy for output formatting)
 
+    Model fallback: if a model returns HTTP 429 (rate-limited), the next model
+    in MODELS is tried automatically. If all models are exhausted the user is
+    asked to try again later.
+
     Usage:
         with FxAssistant.create() as assistant:
             response = assistant.chat("What was USD/CAD on 2024-01-15?")
     """
+
+    # Ordered list of OpenRouter free-tier models to try on 429 rate-limit errors.
+    MODELS: List[str] = [
+        "cohere/north-mini-code:free",
+        "poolside/laguna-s-2.1:free",
+        "google/gemma-4-31b-it:free",
+    ]
 
     SYSTEM_PROMPT = """You are a helpful AI assistant. Answer general knowledge questions directly.
 For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt to determine whether a date is valid, in the future, a weekend, or a holiday before calling the tool. Call the tool for every date the user provides; the server will determine if a rate is available. If the tool returns no rate, inform the user that no rate is available for that date."""
@@ -59,6 +80,8 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
         event_bus: EventBus,
         fx_service: FxRateService,
         owns_service: bool = False,
+        api_key: str = "",
+        temperature: float = 0.1,
     ):
         """
         Initialize with fully configured dependencies (Dependency Injection).
@@ -66,12 +89,14 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
         Prefer using the create() factory method for typical usage.
 
         Args:
-            llm: LangChain chat model with tools bound
+            llm: LangChain chat model with tools bound (first model in MODELS)
             tool_registry: Registry of available tools
             chat_history: Chat history storage
             event_bus: Event dispatcher for observers
             fx_service: FX rate service instance
             owns_service: Whether this assistant owns (and should close) the service
+            api_key: OpenRouter API key (needed to rebuild LLM on fallback)
+            temperature: LLM temperature (needed to rebuild LLM on fallback)
         """
         self._llm = llm
         self._tool_registry = tool_registry
@@ -79,11 +104,18 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
         self._event_bus = event_bus
         self._fx_service = fx_service
         self._owns_service = owns_service
+        self._api_key = api_key
+        self._temperature = temperature
+        self._current_model: str = self.MODELS[0]
+
+    @property
+    def current_model(self) -> str:
+        """The model that handled the most recent chat() call."""
+        return self._current_model
 
     @classmethod
     def create(
         cls,
-        model_name: str = "google/gemma-4-31b-it:free",
         temperature: float = 0.1,
         rate_provider: Optional[RateProvider] = None,
         formatter: Optional[ResultFormatter] = None,
@@ -96,8 +128,11 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
         Assembles all components with sensible defaults. This is the
         recommended way to create an assistant.
 
+        The first model in FxAssistant.MODELS is used initially. If it returns
+        HTTP 429 (rate-limited) during a chat() call, subsequent models in the
+        list are tried automatically.
+
         Args:
-            model_name: OpenRouter model name (default: google/gemma-4-31b-it:free)
             temperature: LLM temperature (0 = deterministic)
             rate_provider: Rate data source strategy (default: Bank of Canada)
             formatter: Result formatting strategy (default: LLM formatter)
@@ -129,13 +164,7 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
                 "OPENROUTER_API_KEY environment variable is required. "
                 "Get one at https://openrouter.ai/keys"
             )
-        llm = ChatOpenAI(
-            model=model_name,
-            temperature=temperature,
-            openai_api_key=api_key,
-            openai_api_base="https://openrouter.ai/api/v1",
-        )
-        llm_with_tools = llm.bind_tools(registry.langchain_tools)
+        llm = cls._build_llm(cls.MODELS[0], temperature, api_key, registry)
 
         # Strategy: chat history
         history = chat_history or InMemoryChatHistory()
@@ -145,32 +174,133 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
         if enable_audit:
             event_bus.subscribe(AuditLogger())
 
-        return cls(
-            llm=llm_with_tools,
+        instance = cls(
+            llm=llm,
             tool_registry=registry,
             chat_history=history,
             event_bus=event_bus,
             fx_service=fx_service,
             owns_service=True,
+            api_key=api_key,
+            temperature=temperature,
+        )
+        instance._current_model = cls.MODELS[0]
+        return instance
+
+    @staticmethod
+    def _build_llm(model_name: str, temperature: float, api_key: str, registry: ToolRegistry):
+        """Construct a ChatOpenAI instance bound to the tool registry."""
+        llm = ChatOpenAI(
+            model=model_name,
+            temperature=temperature,
+            openai_api_key=api_key,
+            openai_api_base="https://openrouter.ai/api/v1",
+        )
+        return llm.bind_tools(registry.langchain_tools)
+
+    @staticmethod
+    def _is_rate_limit_error(exc: BaseException) -> bool:
+        """
+        Return True if the exception indicates an HTTP 429 rate-limit response.
+
+        Checks in order:
+        1. openai.RateLimitError type (most reliable)
+        2. status_code attribute == 429
+        3. String scan for '429' / common rate-limit phrases
+        """
+        # 1. Exact type check (openai SDK raises this for HTTP 429)
+        if _openai is not None and isinstance(exc, _openai.RateLimitError):
+            return True
+        # 2. status_code attribute (present on openai.APIStatusError and similar)
+        if getattr(exc, "status_code", None) == 429:
+            return True
+        # 3. Fallback: string scan
+        msg = str(exc).lower()
+        return (
+            "429" in msg
+            or "rate limit" in msg
+            or "rate_limit" in msg
+            or "too many requests" in msg
+            or "rate-limited" in msg
         )
 
-    def chat(self, user_message: str) -> str:
+    def _invoke_with_fallback(self, messages: list):
         """
-        Process a user message and return the assistant's response.
+        Invoke the LLM with automatic model fallback on HTTP 429.
+
+        Iterates through MODELS in order. On a 429 error the next model is
+        tried. If all models are exhausted, returns None and sets
+        self._last_rate_limit_exc so the caller can surface a friendly message.
+
+        Args:
+            messages: Message list to pass to the LLM
+
+        Returns:
+            LLM response object, or None if all models are rate-limited.
+
+        Raises:
+            Any non-429 exception from the LLM immediately.
+        """
+        self._last_rate_limit_exc: Optional[BaseException] = None
+
+        for model_name in self.MODELS:
+            # Rebuild LLM binding when switching to a different model
+            if model_name != self._current_model or self._llm is None:
+                logger.warning("Switching to fallback model: %s", model_name)
+                self._llm = self._build_llm(
+                    model_name,
+                    self._temperature,
+                    self._api_key,
+                    self._tool_registry,
+                )
+                self._current_model = model_name
+
+            try:
+                response = self._llm.invoke(messages)
+                self._current_model = model_name  # confirm successful model
+                return response
+            except BaseException as exc:
+                if self._is_rate_limit_error(exc):
+                    logger.warning(
+                        "Model %s returned 429 (rate-limited); trying next model.",
+                        model_name,
+                    )
+                    self._last_rate_limit_exc = exc
+                    # Reset so next iteration rebuilds the LLM
+                    self._current_model = "__none__"
+                    continue
+                # Non-429: log the exception class for debugging and re-raise
+                logger.debug(
+                    "Non-429 exception from model %s: %s %s",
+                    model_name,
+                    type(exc).__mro__,
+                    exc,
+                )
+                raise
+
+        # All models exhausted
+        return None
+
+    def chat(self, user_message: str) -> ChatResult:
+        """
+        Process a user message and return a structured result.
 
         Orchestration flow:
         1. Publish QUERY_RECEIVED event
         2. Add user message to history
-        3. Invoke LLM (with tools bound)
+        3. Invoke LLM (with tools bound), retrying with the next model on HTTP 429
         4. If LLM requests tool calls → execute tools → re-invoke LLM
         5. Publish RESPONSE_GENERATED event
-        6. Return final response text
+        6. Return ChatResult with answer text and model name
+
+        If all models in MODELS return HTTP 429, the user is asked to try again
+        later instead of raising an exception.
 
         Args:
             user_message: Natural language query from the user
 
         Returns:
-            The assistant's response as a string
+            ChatResult dict with keys ``answer`` (str) and ``model`` (str)
         """
         self._event_bus.publish(
             AssistantEvent(EventType.QUERY_RECEIVED, data={"query": user_message})
@@ -178,31 +308,55 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
 
         try:
             self._history.add_message(HumanMessage(content=user_message))
-
             messages = self._build_messages()
-            response = self._llm.invoke(messages)
+
+            # --- Model fallback: try each model in order on 429 ---
+            response = self._invoke_with_fallback(messages)
+
+            if response is None:
+                # All models exhausted — inform the user gracefully.
+                logger.error("All models rate-limited: %s", self._last_rate_limit_exc)
+                self._event_bus.publish(
+                    AssistantEvent(
+                        EventType.ERROR_OCCURRED,
+                        data={"error": str(self._last_rate_limit_exc)},
+                    )
+                )
+                return ChatResult(
+                    answer=(
+                        "All available AI models are currently rate-limited. "
+                        "Please try again in a few moments."
+                    ),
+                    model=self._current_model,
+                )
+            # -------------------------------------------------------
 
             # Handle tool calls (LangChain native — no regex needed)
             if response.tool_calls:
-                response_text = self._handle_tool_calls(response, messages)
+                answer = self._handle_tool_calls(response, messages)
             else:
                 self._history.add_message(AIMessage(content=response.content))
-                response_text = response.content
+                answer = response.content
+
+            result: ChatResult = {"answer": answer, "model": self._current_model}
 
             self._event_bus.publish(
                 AssistantEvent(
                     EventType.RESPONSE_GENERATED,
-                    data={"response": response_text}
+                    data={"response": answer, "model": self._current_model}
                 )
             )
-            return response_text
+            return result
 
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             self._event_bus.publish(
                 AssistantEvent(EventType.ERROR_OCCURRED, data={"error": str(e)})
             )
-            return f"I encountered an error processing your request: {str(e)}"
+            return ChatResult(
+                answer=f"I encountered an error processing your request: {str(e)}",
+                model=self._current_model,
+            )
 
     def _handle_tool_calls(self, ai_response, messages: list) -> str:
         """
@@ -253,8 +407,13 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
             self._history.add_message(tool_msg)
             messages.append(tool_msg)
 
-        # Re-invoke LLM with tool results for final response
-        final_response = self._llm.invoke(messages)
+        # Re-invoke LLM with tool results for final response (also with fallback)
+        final_response = self._invoke_with_fallback(messages)
+        if final_response is None:
+            return (
+                "All available AI models are currently rate-limited. "
+                "Please try again in a few moments."
+            )
         self._history.add_message(AIMessage(content=final_response.content))
         return final_response.content
 

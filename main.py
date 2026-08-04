@@ -111,8 +111,9 @@ def main():
     # Single query mode
     if args.query:
         with _build_assistant(args.compliance) as assistant:
-            response = assistant.chat(args.query)
-            print(response)
+            result = assistant.chat(args.query)
+            print(result["answer"])
+            print(f"\n[Model: {result['model']}]")
         return 0
     
     # Interactive mode
@@ -137,8 +138,9 @@ def main():
                         continue
                     
                     print("\nAssistant: ", end="", flush=True)
-                    response = assistant.chat(user_input)
-                    print(response)
+                    result = assistant.chat(user_input)
+                    print(result["answer"])
+                    print(f"[Model: {result['model']}]")
                     print()
                     
                 except KeyboardInterrupt:

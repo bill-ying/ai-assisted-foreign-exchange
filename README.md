@@ -25,8 +25,8 @@ Exchange rate data is fetched via a dedicated [MCP server](https://github.com/bi
 ┌───────────────────────────────────────────────────────────┐
 │                  AI-Assisted FX Rate Lookup               │
 │                                                           │
-│  User ──► OpenRouter (Gemma 4) ──► LangChain Tool Call    │
-│                                    │                      │
+│  User ─► OpenRouter (Cohere/Poolside/Google) ─► LangChain │
+│                          Tool Call │                      │
 │                                    ▼                      │
 │                          McpProvider (Strategy)           │
 │                       MCP Python SDK (Streamable HTTP)    │
@@ -50,18 +50,30 @@ This decoupled architecture cleanly separates concerns:
 
 The original [fx-rate](https://github.com/bill-ying/fx-rate) project is a traditional command-line utility. It relies on strict, deterministic inputs where users must provide specific flags and formats (e.g., `--date 2024-01-01`) to get a result. This ensures reliability but offers a rigid user experience.
 
-In contrast, this **AI-assisted project** acts as a Proof of Concept for a modern, conversational interface. **Gemma 4 31B** is leveraged via OpenRouter to understand natural language queries (e.g., "What was the rate on 2024-01-15?"), whereby an intuitive and user-friendly experience is prioritized while the same underlying data source is used.
+In contrast, this **AI-assisted project** acts as a Proof of Concept for a modern, conversational interface. Free-tier models on OpenRouter (led by **Cohere North Mini Code**) are leveraged to understand natural language queries (e.g., "What was the rate on 2024-01-15?"), whereby an intuitive and user-friendly experience is prioritized while the same underlying data source is used.
 
 ## Features
 
 - **Natural Language Queries**: Exchange rates can be queried in plain English
 - **MCP Server Integration**: Exchange rates are fetched via the [Bank of Canada Valet MCP server](https://github.com/bill-ying/mcp-server-ts-bank-of-canada-valet) using the MCP Python SDK (Streamable HTTP transport)
-- **AI-Powered**: **Gemma 4 31B** is used via OpenRouter (using `google/gemma-4-31b-it:free`) with native function calling (LangChain)
+- **AI-Powered**: Multiple free-tier OpenRouter models are used with automatic fallback (see [Model Fallback](#model-fallback)); native function calling via LangChain
 - **Bidirectional**: Both USD→CAD and CAD→USD conversions are supported
 - **Amount Conversion**: An amount can be specified to be converted, not just the rate
 - **Audit Logging**: All tool calls and responses are logged via the Observer pattern
 - **Compliance Validation** *(opt-in)*: LangGraph graph verifies every LLM response against raw tool data, auto-corrects on failure, and appends a disclaimer if correction is exhausted
 - **IDE Debugging**: Includes VS Code debug configurations
+
+## Model Fallback
+
+The assistant uses a prioritised list of free-tier OpenRouter models. If the primary model returns an **HTTP 429 (rate-limited)** response, the next model in the list is tried automatically. If all three models are rate-limited simultaneously, the user receives a friendly message asking them to try again later.
+
+| Priority | Model ID | Provider |
+|----------|----------|----------|
+| 1 (primary) | `cohere/north-mini-code:free` | Cohere |
+| 2 (fallback) | `poolside/laguna-s-2.1:free` | Poolside |
+| 3 (fallback) | `google/gemma-4-31b-it:free` | Google |
+
+The fallback list is defined in `FxAssistant.MODELS` and can be updated without touching any other code.
 
 ## Compliance Validation (LangGraph)
 
@@ -81,10 +93,10 @@ invoke_llm
                                     │                             │
                                   emit                         correct
                                  [END]                (inject correction prompt)
-                                                               │
-                                                        max retries?
-                                                                ├─ yes ──► emit + disclaimer
-                                                                └─ no  ──► invoke_llm_final
+                                                                  │
+                                                            max retries?
+                                                                  ├─ yes ──► emit + disclaimer
+                                                                  └─ no  ──► invoke_llm_final
 ```
 
 ### Compliance Rules (Chain of Responsibility)
