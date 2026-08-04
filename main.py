@@ -3,7 +3,7 @@
 AI-Assisted Foreign Exchange Rate Lookup
 
 Interactive CLI application for querying USD/CAD exchange rates
-using natural language. Powered by Gemma via OpenRouter.
+using natural language. Powered by OpenRouter.
 
 Pass --compliance to enable the LangGraph compliance validation graph,
 which verifies every LLM response against the raw tool data before
@@ -34,7 +34,7 @@ def print_welcome(compliance_mode: bool = False):
     """Print welcome message and usage hints."""
     print("\n" + "=" * 60)
     print("  AI-Assisted USD/CAD Exchange Rate Lookup")
-    print("  Powered by Bank of Canada data & Gemma 4")
+    print("  Powered by Bank of Canada data")
     if compliance_mode:
         print("  ✓ Compliance validation enabled (LangGraph)")
     print("=" * 60)

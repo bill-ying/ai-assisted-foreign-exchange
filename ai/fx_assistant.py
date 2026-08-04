@@ -64,9 +64,9 @@ class FxAssistant:
 
     # Ordered list of OpenRouter free-tier models to try on 429 rate-limit errors.
     MODELS: List[str] = [
+        "google/gemma-4-31b-it:free",
         "cohere/north-mini-code:free",
         "poolside/laguna-s-2.1:free",
-        "google/gemma-4-31b-it:free",
     ]
 
     SYSTEM_PROMPT = """You are a helpful AI assistant. Answer general knowledge questions directly.
@@ -116,6 +116,7 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
     @classmethod
     def create(
         cls,
+        model_name: str = "",
         temperature: float = 0.1,
         rate_provider: Optional[RateProvider] = None,
         formatter: Optional[ResultFormatter] = None,
@@ -133,6 +134,7 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
         list are tried automatically.
 
         Args:
+            model_name: Initial model to use. Defaults to MODELS[0] when empty.
             temperature: LLM temperature (0 = deterministic)
             rate_provider: Rate data source strategy (default: Bank of Canada)
             formatter: Result formatting strategy (default: LLM formatter)
@@ -164,7 +166,8 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
                 "OPENROUTER_API_KEY environment variable is required. "
                 "Get one at https://openrouter.ai/keys"
             )
-        llm = cls._build_llm(cls.MODELS[0], temperature, api_key, registry)
+        first_model = model_name or cls.MODELS[0]
+        llm = cls._build_llm(first_model, temperature, api_key, registry)
 
         # Strategy: chat history
         history = chat_history or InMemoryChatHistory()
@@ -184,7 +187,7 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
             api_key=api_key,
             temperature=temperature,
         )
-        instance._current_model = cls.MODELS[0]
+        instance._current_model = first_model
         return instance
 
     @staticmethod
@@ -243,7 +246,10 @@ For USD/CAD exchange rates, ALWAYS use the get_fx_rate tool — do NOT attempt t
         """
         self._last_rate_limit_exc: Optional[BaseException] = None
 
-        for model_name in self.MODELS:
+        # Build list of models starting with current_model, followed by remaining fallbacks
+        models_to_try = [self._current_model] + [m for m in self.MODELS if m != self._current_model]
+
+        for model_name in models_to_try:
             # Rebuild LLM binding when switching to a different model
             if model_name != self._current_model or self._llm is None:
                 logger.warning("Switching to fallback model: %s", model_name)

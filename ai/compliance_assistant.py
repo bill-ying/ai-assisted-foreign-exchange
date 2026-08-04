@@ -31,7 +31,7 @@ from langchain_core.messages import HumanMessage
 from ai.compliance import ComplianceGraphBuilder, LenientValidationStrategy, ValidationStrategy
 from ai.compliance.state import ComplianceStatus
 from ai.events import AssistantEvent, EventType
-from ai.fx_assistant import FxAssistant
+from ai.fx_assistant import FxAssistant, ChatResult
 from fx_service.rate_provider import RateProvider
 from ai.result_formatter import ResultFormatter
 from ai.chat_history import ChatHistory
@@ -132,11 +132,29 @@ class ComplianceFxAssistant(FxAssistant):
             enable_audit=enable_audit,
         )
 
-        # Build the compliance graph via the Builder
+        # Build the compliance graph via the Builder, injecting the fallback-aware
+        # invoke callable so the graph gets automatic 429 retries.
         strategy = validation_strategy or LenientValidationStrategy()
+
+        # We need a temporary instance to bind _invoke_with_fallback, so build it
+        # first, then pass its method into the graph builder.
+        instance = cls(
+            llm=base._llm,
+            tool_registry=base._tool_registry,
+            chat_history=base._history,
+            event_bus=base._event_bus,
+            fx_service=base._fx_service,
+            compliance_graph=None,  # temporary placeholder
+            owns_service=True,
+        )
+        # Restore the selected model (super().__init__ resets to MODELS[0])
+        instance._current_model = model_name or cls.MODELS[0]
+        instance._api_key = base._api_key
+        instance._temperature = base._temperature
+
         compliance_graph = (
             ComplianceGraphBuilder(
-                llm=base._llm,
+                llm_invoke=instance._invoke_with_fallback,
                 tool_registry=base._tool_registry,
                 event_bus=base._event_bus,
                 system_prompt=cls.SYSTEM_PROMPT,
@@ -145,18 +163,10 @@ class ComplianceFxAssistant(FxAssistant):
             .with_max_corrections(max_corrections)
             .build()
         )
+        instance._compliance_graph = compliance_graph
+        return instance
 
-        return cls(
-            llm=base._llm,
-            tool_registry=base._tool_registry,
-            chat_history=base._history,
-            event_bus=base._event_bus,
-            fx_service=base._fx_service,
-            compliance_graph=compliance_graph,
-            owns_service=True,
-        )
-
-    def chat(self, user_message: str) -> str:
+    def chat(self, user_message: str) -> ChatResult:
         """
         Process a user message through the compliance validation graph.
 
@@ -171,7 +181,8 @@ class ComplianceFxAssistant(FxAssistant):
             user_message: Natural language query from the user
 
         Returns:
-            The compliance-validated (and possibly corrected) response string
+            ChatResult dict with keys ``answer`` (compliance-validated response)
+            and ``model`` (model that produced the final answer)
         """
         self._event_bus.publish(
             AssistantEvent(EventType.QUERY_RECEIVED, data={"query": user_message})
@@ -204,14 +215,17 @@ class ComplianceFxAssistant(FxAssistant):
                     final_state.get("correction_attempts", 0),
                 )
 
-            return response
+            return ChatResult(answer=response, model=self._current_model)
 
         except Exception as e:
             logger.error("Error processing message through compliance graph: %s", e)
             self._event_bus.publish(
                 AssistantEvent(EventType.ERROR_OCCURRED, data={"error": str(e)})
             )
-            return f"I encountered an error processing your request: {str(e)}"
+            return ChatResult(
+                answer=f"I encountered an error processing your request: {str(e)}",
+                model=self._current_model,
+            )
 
     def get_graph_mermaid(self) -> str:
         """

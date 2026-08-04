@@ -86,19 +86,22 @@ class ComplianceGraphBuilder:
 
     def __init__(
         self,
-        llm,
+        llm_invoke,
         tool_registry: ToolRegistry,
         event_bus: EventBus,
         system_prompt: str,
     ) -> None:
         """
         Args:
-            llm:           LangChain chat model with tools already bound
+            llm_invoke:    Callable that accepts a message list and returns an
+                           AIMessage (or None if all models are rate-limited).
+                           Typically FxAssistant._invoke_with_fallback — this
+                           gives the graph automatic 429 retry and model fallback.
             tool_registry: Registry of available domain tools
             event_bus:     Observer bus for audit event publishing
             system_prompt: System prompt injected at the start of every invocation
         """
-        self._llm = llm
+        self._llm_invoke = llm_invoke
         self._tool_registry = tool_registry
         self._event_bus = event_bus
         self._system_prompt = system_prompt
@@ -171,7 +174,11 @@ class ComplianceGraphBuilder:
         otherwise the graph routes directly to invoke_llm_final.
         """
         messages = [SystemMessage(content=self._system_prompt)] + state["messages"]
-        response = self._llm.invoke(messages)
+        response = self._llm_invoke(messages)
+        if response is None:
+            raise RuntimeError(
+                "All models are rate-limited. Please try again in a few moments."
+            )
         return {
             "messages":    [response],
             "llm_response": response.content,
@@ -229,7 +236,11 @@ class ComplianceGraphBuilder:
         The full accumulated message list is passed to preserve context.
         """
         messages = [SystemMessage(content=self._system_prompt)] + state["messages"]
-        response = self._llm.invoke(messages)
+        response = self._llm_invoke(messages)
+        if response is None:
+            raise RuntimeError(
+                "All models are rate-limited. Please try again in a few moments."
+            )
         return {
             "messages":     [response],
             "llm_response":  response.content,
